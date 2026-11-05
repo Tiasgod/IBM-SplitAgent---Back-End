@@ -1,4 +1,3 @@
-
 from decimal import Decimal, ROUND_HALF_UP, InvalidOperation
 from datetime import date
 
@@ -18,10 +17,10 @@ class ForecastAgent:
             }
 
         try:
-            target_date = date.fromisoformat(forecast_date)
-
             if not isinstance(forecast_date, str):
                 raise ValueError()
+
+            target_date = date.fromisoformat(forecast_date)
 
         except (ValueError, TypeError):
             return {
@@ -116,9 +115,7 @@ class ForecastAgent:
                     "date": movement_date.isoformat()
                 })
 
-        projected_balance = (
-            balance + total_income - total_expense
-        )
+        projected_balance = balance + total_income - total_expense
 
         return {
             "status": "ok",
