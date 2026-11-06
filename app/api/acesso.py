@@ -14,10 +14,11 @@ from app.services import acesso_service as service
 router = APIRouter(prefix="/acesso", tags=["Acesso e conta"])
 logger = logging.getLogger(__name__)
 
-@router.post("/cadastro", response_model=UsuarioResponse, status_code=status.HTTP_201_CREATED)
+@router.post("/cadastro", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 def cadastrar(dados: CadastroRequest, db: Session = Depends(get_db)):
     try:
-        return service.cadastrar(db, dados)
+        usuario = service.cadastrar(db, dados)
+        return service.criar_sessao(db, usuario)
     except service.AcessoErro as exc:
         raise HTTPException(status_code=exc.status_code, detail=exc.mensagem) from exc
 
