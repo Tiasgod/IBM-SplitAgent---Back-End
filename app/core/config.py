@@ -5,7 +5,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 def normalizar_url_banco(url: str) -> str:
-    """Ajusta a URL do Neon/Railway para o driver psycopg (v3) do SQLAlchemy."""
+    """Ajusta a URL do Neon/Railway para o driver psycopg (v3)."""
     if url.startswith("postgres://"):
         url = "postgresql://" + url[len("postgres://"):]
 
@@ -16,7 +16,7 @@ def normalizar_url_banco(url: str) -> str:
 
 
 class Settings(BaseSettings):
-    """Configurações lidas de variáveis de ambiente e do arquivo .env."""
+    """Configurações da aplicação."""
 
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -33,8 +33,12 @@ class Settings(BaseSettings):
     # Banco de dados
     database_url: str | None = None
     database_url_direct: str | None = None
+    database_pool_size: int = 5
+    database_max_overflow: int = 5
+    database_pool_timeout: int = 15
+    database_pool_recycle: int = 300
 
-    # Envio de e-mail para recuperação de senha
+    # E-mail
     smtp_host: str | None = None
     smtp_port: int = 587
     smtp_user: str | None = None
@@ -49,14 +53,16 @@ class Settings(BaseSettings):
     cloudflare_account_id: str | None = None
     cloudflare_api_token: str | None = None
     cloudflare_model: str = "@cf/zai-org/glm-4.7-flash"
-    cloudflare_timeout_seconds: int = 180
+    cloudflare_timeout_seconds: int = 45
+    cloudflare_connect_timeout_seconds: int = 5
+    cloudflare_max_tokens: int = 600
+    cloudflare_max_tool_rounds: int = 2
 
-    # Importação de planilhas
+    # Importação
     importacao_max_mb: int = 5
     importacao_max_linhas: int = 5000
     fuso_horario: str = "America/Sao_Paulo"
 
-    # Provisório até a implementação completa do acesso e conta
     usuario_dev_id: int | None = None
 
     @field_validator("usuario_dev_id", mode="before")
@@ -78,16 +84,13 @@ class Settings(BaseSettings):
     def sqlalchemy_database_url(self) -> str | None:
         if not self.database_url or not self.database_url.strip():
             return None
-
         return normalizar_url_banco(self.database_url.strip())
 
     @property
     def sqlalchemy_migration_url(self) -> str | None:
         direta = (self.database_url_direct or "").strip()
-
         if direta:
             return normalizar_url_banco(direta)
-
         return self.sqlalchemy_database_url
 
 

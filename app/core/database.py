@@ -16,26 +16,51 @@ class DatabaseNotConfiguredError(RuntimeError):
 
 @lru_cache
 def get_engine() -> Engine:
-    url = get_settings().sqlalchemy_database_url
+    settings = get_settings()
+    url = settings.sqlalchemy_database_url
+
     if not url:
         raise DatabaseNotConfiguredError("DATABASE_URL não configurada.")
 
-    opcoes: dict = {"pool_pre_ping": True}
+    opcoes = {
+        "pool_pre_ping": True,
+        "pool_size": settings.database_pool_size,
+        "max_overflow": settings.database_max_overflow,
+        "pool_timeout": settings.database_pool_timeout,
+        "pool_recycle": settings.database_pool_recycle,
+    }
+
     if url.startswith("postgresql"):
-        # O Neon suspende o banco quando ocioso: recicla conexões e aceita a demora do primeiro acesso.
-        opcoes["pool_recycle"] = 300
-        opcoes["connect_args"] = {"connect_timeout": 15}
+        opcoes["connect_args"] = {
+            "connect_timeout": 10,
+            "keepalives": 1,
+            "keepalives_idle": 30,
+            "keepalives_interval": 10,
+            "keepalives_count": 3,
+        }
+
+    elif url.startswith("sqlite"):
+        opcoes.pop("pool_size", None)
+        opcoes.pop("max_overflow", None)
+        opcoes.pop("pool_timeout", None)
+        opcoes.pop("pool_recycle", None)
+
     return create_engine(url, **opcoes)
 
 
 @lru_cache
 def get_session_factory() -> sessionmaker[Session]:
-    return sessionmaker(bind=get_engine(), autoflush=False, expire_on_commit=False)
+    return sessionmaker(
+        bind=get_engine(),
+        autoflush=False,
+        expire_on_commit=False,
+    )
 
 
 def get_db() -> Iterator[Session]:
-    """Dependência do FastAPI: abre uma sessão por requisição e sempre a encerra."""
+    """Abre uma sessão por requisição e sempre a encerra."""
     db = get_session_factory()()
+
     try:
         yield db
     finally:
@@ -43,6 +68,6 @@ def get_db() -> Iterator[Session]:
 
 
 def check_connection() -> None:
-    """Executa um SELECT 1 para confirmar que o banco responde."""
+    """Confirma que o banco responde."""
     with get_engine().connect() as conexao:
         conexao.execute(text("SELECT 1"))
