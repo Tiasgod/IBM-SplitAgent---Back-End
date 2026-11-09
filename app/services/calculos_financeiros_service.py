@@ -1,9 +1,8 @@
-
 from collections import defaultdict
 from datetime import date, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal, select, union_all
 from sqlalchemy.orm import Session
 
 from app.core.erros import RequisicaoInvalidaError
@@ -36,44 +35,39 @@ def _somar(db: Session, coluna, *filtros) -> Decimal:
 
 
 def _saldo_base(db: Session, usuario_id: int) -> tuple[date | None, Decimal]:
-    importado = db.scalars(
-        select(SaldoInicial)
-        .where(SaldoInicial.usuario_id == usuario_id)
+    """Busca o saldo-base mais recente em uma única ida ao banco."""
+    saldos = union_all(
+        select(
+            SaldoInicial.data_referencia.label("data_referencia"),
+            SaldoInicial.saldo.label("saldo"),
+            literal(0).label("prioridade"),
+            SaldoInicial.id.label("id"),
+        ).where(SaldoInicial.usuario_id == usuario_id),
+        select(
+            SaldoManual.data_referencia.label("data_referencia"),
+            SaldoManual.saldo.label("saldo"),
+            literal(1).label("prioridade"),
+            SaldoManual.id.label("id"),
+        ).where(SaldoManual.usuario_id == usuario_id),
+    ).subquery()
+
+    registro = db.execute(
+        select(
+            saldos.c.data_referencia,
+            saldos.c.saldo,
+        )
         .order_by(
-            SaldoInicial.data_referencia.desc(),
-            SaldoInicial.id.desc()
+            saldos.c.data_referencia.desc(),
+            saldos.c.prioridade.desc(),
+            saldos.c.id.desc(),
         )
         .limit(1)
     ).first()
 
-    manual = db.scalars(
-        select(SaldoManual)
-        .where(SaldoManual.usuario_id == usuario_id)
-        .order_by(
-            SaldoManual.data_referencia.desc(),
-            SaldoManual.id.desc()
-        )
-        .limit(1)
-    ).first()
-
-    candidatos = [
-        item for item in (importado, manual)
-        if item is not None
-    ]
-
-    if not candidatos:
+    if registro is None:
         return None, ZERO
 
-    saldo = max(
-        candidatos,
-        key=lambda item: (
-            item.data_referencia,
-            isinstance(item, SaldoManual),
-            item.id
-        )
-    )
-
-    return saldo.data_referencia, _dinheiro(saldo.saldo)
+    return registro.data_referencia, _dinheiro(registro.saldo)
 
 
 def _periodos_abaixo_minimo(
@@ -225,42 +219,49 @@ def calcular_fluxo_caixa(
             Despesa.vencimento > data_saldo
         )
 
-    recebidos_brutos = _somar(
-        db,
-        Recebivel.valor_esperado,
-        *filtros_recebidos
-    )
-
-    despesas_passadas = _somar(
-        db,
-        Despesa.valor,
-        *filtros_pagos
-    )
-
-    # Lançamentos manuais realizados até hoje.
+    # Inclui movimentações manuais feitas na própria data do saldo inicial.
     filtros_manuais = [
         MovimentacaoManual.usuario_id == usuario_id,
         MovimentacaoManual.data <= hoje_local,
     ]
-
-    # Inclui movimentações feitas na própria data do saldo inicial.
     if data_saldo is not None:
-        filtros_manuais.append(
-            MovimentacaoManual.data >= data_saldo
+        filtros_manuais.append(MovimentacaoManual.data >= data_saldo)
+
+    # Quatro agregações históricas em uma única consulta SQL.
+    totais_historicos = db.execute(
+        select(
+            select(func.coalesce(func.sum(Recebivel.valor_esperado), 0))
+            .where(*filtros_recebidos)
+            .scalar_subquery()
+            .label("recebidos_brutos"),
+            select(func.coalesce(func.sum(Despesa.valor), 0))
+            .where(*filtros_pagos)
+            .scalar_subquery()
+            .label("despesas_passadas"),
+            select(func.coalesce(func.sum(MovimentacaoManual.valor), 0))
+            .where(
+                *filtros_manuais,
+                MovimentacaoManual.tipo == "entrada",
+            )
+            .scalar_subquery()
+            .label("entradas_manuais_passadas"),
+            select(func.coalesce(func.sum(MovimentacaoManual.valor), 0))
+            .where(
+                *filtros_manuais,
+                MovimentacaoManual.tipo == "saida",
+            )
+            .scalar_subquery()
+            .label("saidas_manuais_passadas"),
         )
+    ).one()
 
-    entradas_manuais_passadas = _somar(
-        db,
-        MovimentacaoManual.valor,
-        *filtros_manuais,
-        MovimentacaoManual.tipo == "entrada",
+    recebidos_brutos = _dinheiro(totais_historicos.recebidos_brutos)
+    despesas_passadas = _dinheiro(totais_historicos.despesas_passadas)
+    entradas_manuais_passadas = _dinheiro(
+        totais_historicos.entradas_manuais_passadas
     )
-
-    saidas_manuais_passadas = _somar(
-        db,
-        MovimentacaoManual.valor,
-        *filtros_manuais,
-        MovimentacaoManual.tipo == "saida",
+    saidas_manuais_passadas = _dinheiro(
+        totais_historicos.saidas_manuais_passadas
     )
 
     taxa = aliquota_tributaria_percentual / Decimal("100")
@@ -290,61 +291,71 @@ def calcular_fluxo_caixa(
         lambda: ZERO
     )
 
-    recebiveis_futuros = db.execute(
+    # Recebíveis, despesas e lançamentos manuais futuros em uma única ida ao banco.
+    movimentos_futuros_query = union_all(
         select(
-            Recebivel.data_prevista,
-            func.sum(Recebivel.valor_esperado)
+            Recebivel.data_prevista.label("data"),
+            literal("entrada").label("tipo"),
+            func.sum(Recebivel.valor_esperado).label("total"),
         )
         .where(
             Recebivel.usuario_id == usuario_id,
             Recebivel.data_prevista > hoje_local,
             Recebivel.data_prevista <= fim,
         )
-        .group_by(Recebivel.data_prevista)
-    ).all()
-
-    for data, total in recebiveis_futuros:
-        entradas_por_dia[data] += _dinheiro(total)
-
-    despesas_futuras = db.execute(
+        .group_by(Recebivel.data_prevista),
         select(
-            Despesa.vencimento,
-            func.sum(Despesa.valor)
+            Despesa.vencimento.label("data"),
+            literal("saida").label("tipo"),
+            func.sum(Despesa.valor).label("total"),
         )
         .where(
             Despesa.usuario_id == usuario_id,
             Despesa.vencimento > hoje_local,
             Despesa.vencimento <= fim,
         )
-        .group_by(Despesa.vencimento)
-    ).all()
-
-    for data, total in despesas_futuras:
-        saidas_por_dia[data] += _dinheiro(total)
-
-    # Movimentações manuais futuras.
-    manuais_futuros = db.execute(
+        .group_by(Despesa.vencimento),
         select(
-            MovimentacaoManual.data,
-            MovimentacaoManual.tipo,
-            func.sum(MovimentacaoManual.valor)
+            MovimentacaoManual.data.label("data"),
+            literal("entrada_manual").label("tipo"),
+            func.sum(MovimentacaoManual.valor).label("total"),
         )
         .where(
             MovimentacaoManual.usuario_id == usuario_id,
+            MovimentacaoManual.tipo == "entrada",
             MovimentacaoManual.data > hoje_local,
             MovimentacaoManual.data <= fim,
         )
-        .group_by(
-            MovimentacaoManual.data,
-            MovimentacaoManual.tipo
+        .group_by(MovimentacaoManual.data),
+        select(
+            MovimentacaoManual.data.label("data"),
+            literal("saida").label("tipo"),
+            func.sum(MovimentacaoManual.valor).label("total"),
+        )
+        .where(
+            MovimentacaoManual.usuario_id == usuario_id,
+            MovimentacaoManual.tipo == "saida",
+            MovimentacaoManual.data > hoje_local,
+            MovimentacaoManual.data <= fim,
+        )
+        .group_by(MovimentacaoManual.data),
+    ).subquery()
+
+    movimentos_futuros = db.execute(
+        select(
+            movimentos_futuros_query.c.data,
+            movimentos_futuros_query.c.tipo,
+            movimentos_futuros_query.c.total,
         )
     ).all()
 
-    for data, tipo_manual, total in manuais_futuros:
-
+    for data, tipo, total in movimentos_futuros:
         valor = _dinheiro(total)
 
-        if tipo_manual == "entrada":
+        if tipo == "entrada":
+            entradas_por_dia[data] += valor
+
+        elif tipo == "entrada_manual":
             entradas_por_dia[data] += valor
             entradas_manuais_por_dia[data] += valor
 

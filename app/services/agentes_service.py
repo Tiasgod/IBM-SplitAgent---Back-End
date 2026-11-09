@@ -1,7 +1,6 @@
-
 from decimal import Decimal, ROUND_HALF_UP
 
-from sqlalchemy import select
+from sqlalchemy import literal, select, union_all
 from sqlalchemy.orm import Session
 
 from app.agents.cash import CashAgent
@@ -42,87 +41,77 @@ def _movimentacoes_realizadas(
 
     movimentos = []
 
-    # Recebíveis importados das planilhas.
     filtros_recebiveis = [
         Recebivel.usuario_id == usuario_id,
         Recebivel.data_prevista <= data_hoje,
     ]
-
-    if data_saldo is not None:
-        filtros_recebiveis.append(
-            Recebivel.data_prevista > data_saldo
-        )
-
-    recebiveis = db.execute(
-        select(
-            Recebivel.valor_esperado,
-            Recebivel.data_prevista,
-        ).where(*filtros_recebiveis)
-    ).all()
-
-    for valor, data in recebiveis:
-        valor_liquido = _dinheiro(
-            _dinheiro(valor) * (Decimal("1") - taxa)
-        )
-
-        if valor_liquido > 0:
-            movimentos.append({
-                "type": "income",
-                "amount": format(valor_liquido, ".2f"),
-                "date": data.isoformat(),
-                "description": "Recebível importado da planilha",
-            })
-
-    # Despesas importadas das planilhas.
     filtros_despesas = [
         Despesa.usuario_id == usuario_id,
         Despesa.vencimento <= data_hoje,
     ]
-
-    if data_saldo is not None:
-        filtros_despesas.append(
-            Despesa.vencimento > data_saldo
-        )
-
-    despesas = db.execute(
-        select(
-            Despesa.valor,
-            Despesa.vencimento,
-        ).where(*filtros_despesas)
-    ).all()
-
-    for valor, data in despesas:
-        movimentos.append({
-            "type": "expense",
-            "amount": format(_dinheiro(valor), ".2f"),
-            "date": data.isoformat(),
-            "description": "Despesa importada da planilha",
-        })
-
-    # Lançamentos financeiros manuais.
     filtros_manuais = [
         MovimentacaoManual.usuario_id == usuario_id,
         MovimentacaoManual.data <= data_hoje,
     ]
 
     if data_saldo is not None:
+        filtros_recebiveis.append(
+            Recebivel.data_prevista > data_saldo
+        )
+        filtros_despesas.append(
+            Despesa.vencimento > data_saldo
+        )
         filtros_manuais.append(
             MovimentacaoManual.data >= data_saldo
         )
 
-    manuais = db.execute(
+    # Une recebíveis, despesas e lançamentos manuais em uma única consulta.
+    movimentos_query = union_all(
         select(
-            MovimentacaoManual.valor,
-            MovimentacaoManual.data,
-            MovimentacaoManual.tipo,
-            MovimentacaoManual.descricao,
-        ).where(*filtros_manuais)
+            Recebivel.valor_esperado.label("valor"),
+            Recebivel.data_prevista.label("data"),
+            literal("income").label("tipo"),
+            literal("Recebível importado da planilha").label("descricao"),
+        ).where(*filtros_recebiveis),
+        select(
+            Despesa.valor.label("valor"),
+            Despesa.vencimento.label("data"),
+            literal("expense").label("tipo"),
+            literal("Despesa importada da planilha").label("descricao"),
+        ).where(*filtros_despesas),
+        select(
+            MovimentacaoManual.valor.label("valor"),
+            MovimentacaoManual.data.label("data"),
+            MovimentacaoManual.tipo.label("tipo"),
+            MovimentacaoManual.descricao.label("descricao"),
+        ).where(*filtros_manuais),
+    ).subquery()
+
+    registros = db.execute(
+        select(
+            movimentos_query.c.valor,
+            movimentos_query.c.data,
+            movimentos_query.c.tipo,
+            movimentos_query.c.descricao,
+        )
     ).all()
 
-    for valor, data, tipo, descricao in manuais:
+    for valor, data, tipo, descricao in registros:
+
+        if tipo == "income":
+            valor = _dinheiro(
+                _dinheiro(valor) * (Decimal("1") - taxa)
+            )
+
+            if valor <= 0:
+                continue
+
+        else:
+            valor = _dinheiro(valor)
+
         movimentos.append({
-            "type": "income" if tipo == "entrada" else "expense",
-            "amount": format(_dinheiro(valor), ".2f"),
+            "type": "income" if tipo in ("income", "entrada") else "expense",
+            "amount": format(valor, ".2f"),
             "date": data.isoformat(),
             "description": descricao,
         })
