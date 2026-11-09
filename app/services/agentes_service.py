@@ -39,8 +39,6 @@ def _movimentacoes_realizadas(
 
     taxa = aliquota_tributaria_percentual / Decimal("100")
 
-    movimentos = []
-
     filtros_recebiveis = [
         Recebivel.usuario_id == usuario_id,
         Recebivel.data_prevista <= data_hoje,
@@ -55,17 +53,11 @@ def _movimentacoes_realizadas(
     ]
 
     if data_saldo is not None:
-        filtros_recebiveis.append(
-            Recebivel.data_prevista > data_saldo
-        )
-        filtros_despesas.append(
-            Despesa.vencimento > data_saldo
-        )
-        filtros_manuais.append(
-            MovimentacaoManual.data >= data_saldo
-        )
+        filtros_recebiveis.append(Recebivel.data_prevista > data_saldo)
+        filtros_despesas.append(Despesa.vencimento > data_saldo)
+        # Mantém a regra original: movimentação manual na data do saldo entra.
+        filtros_manuais.append(MovimentacaoManual.data >= data_saldo)
 
-    # Une recebíveis, despesas e lançamentos manuais em uma única consulta.
     movimentos_query = union_all(
         select(
             Recebivel.valor_esperado.label("valor"),
@@ -96,22 +88,24 @@ def _movimentacoes_realizadas(
         )
     ).all()
 
+    movimentos = []
     for valor, data, tipo, descricao in registros:
+        valor_decimal = _dinheiro(valor)
 
+        # Recebíveis importados recebem a mesma dedução tributária usada
+        # anteriormente; entradas manuais não são presumidas como vendas.
         if tipo == "income":
-            valor = _dinheiro(
-                _dinheiro(valor) * (Decimal("1") - taxa)
+            valor_decimal = _dinheiro(
+                valor_decimal * (Decimal("1") - taxa)
             )
-
-            if valor <= 0:
+            if valor_decimal <= 0:
                 continue
-
         else:
-            valor = _dinheiro(valor)
+            valor_decimal = _dinheiro(valor_decimal)
 
         movimentos.append({
             "type": "income" if tipo in ("income", "entrada") else "expense",
-            "amount": format(valor, ".2f"),
+            "amount": format(valor_decimal, ".2f"),
             "date": data.isoformat(),
             "description": descricao,
         })

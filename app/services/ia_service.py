@@ -48,8 +48,15 @@ def _cliente(settings) -> httpx.Client:
 
 
 def _extrair_resposta(payload: dict[str, Any]) -> str:
-    resultado = payload.get("result") or {}
+    # Chat Completions retorna choices na raiz; ai/run costuma usar result.
+    escolhas = payload.get("choices") or []
+    if escolhas:
+        mensagem = escolhas[0].get("message") or {}
+        conteudo = mensagem.get("content")
+        if isinstance(conteudo, str) and conteudo.strip():
+            return conteudo.strip()
 
+    resultado = payload.get("result") or {}
     if isinstance(resultado, dict):
         for chave in ("response", "output", "text"):
             resposta = resultado.get(chave)
@@ -121,22 +128,25 @@ def interpretar_analise_financeira(
     )
 
     corpo = {
+        "model": settings.cloudflare_model,
         "messages": [
             {
                 "role": "system",
                 "content": (
-                    "Você é um assistente financeiro objetivo. "
+                    "Você é um analista financeiro objetivo. "
                     "Responda em português brasileiro. "
-                    "Nunca invente ou recalcule dados financeiros."
+                    "Nunca invente, altere ou recalcule dados financeiros."
                 ),
             },
             {"role": "user", "content": prompt},
         ],
+        "temperature": 0.2,
+        "max_tokens": min(settings.cloudflare_max_tokens, 450),
     }
 
     try:
         response = _cliente(settings).post(
-            _url_run(settings),
+            _url_chat(settings),
             headers=_headers(settings),
             json=corpo,
         )
