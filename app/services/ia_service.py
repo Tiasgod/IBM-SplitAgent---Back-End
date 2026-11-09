@@ -1,3 +1,4 @@
+
 """Integração otimizada com Cloudflare Workers AI."""
 
 import json
@@ -121,8 +122,8 @@ def interpretar_analise_financeira(
         "Se faltarem dados, informe a limitação. "
         "Não dê aconselhamento contábil, tributário ou de crédito oficial. "
         "Responda em português brasileiro, objetivamente, apresentando: "
-        "situação financeira, pontos de atenção, até três recomendações "
-        "práticas e limitações da análise. "
+        "situação financeira, pontos de atenção e até três recomendações "
+        "práticas. "
         "Dados calculados pelo backend: "
         + json.dumps(dados, ensure_ascii=False, separators=(",", ":"))
     )
@@ -138,10 +139,16 @@ def interpretar_analise_financeira(
                     "Nunca invente, altere ou recalcule dados financeiros."
                 ),
             },
-            {"role": "user", "content": prompt},
+            {
+                "role": "user",
+                "content": prompt,
+            },
         ],
         "temperature": 0.2,
-        "max_tokens": min(settings.cloudflare_max_tokens, 450),
+        "max_completion_tokens": 450,
+        "chat_template_kwargs": {
+            "enable_thinking": False,
+        },
     }
 
     try:
@@ -150,9 +157,11 @@ def interpretar_analise_financeira(
             headers=_headers(settings),
             json=corpo,
         )
+
         response.raise_for_status()
 
-        recomendacao = _extrair_resposta(response.json())
+        payload = response.json()
+        recomendacao = _extrair_resposta(payload)
 
         return {
             "status": "ok",
@@ -162,7 +171,9 @@ def interpretar_analise_financeira(
         }
 
     except httpx.TimeoutException:
-        logger.warning("Timeout na interpretação financeira do Cloudflare.")
+        logger.warning(
+            "Timeout na interpretação financeira do Cloudflare."
+        )
         return {
             "status": "indisponivel",
             "provedor": "Cloudflare Workers AI",
@@ -174,9 +185,10 @@ def interpretar_analise_financeira(
         }
 
     except httpx.HTTPStatusError as exc:
-        logger.warning(
-            "Cloudflare retornou HTTP %s.",
+        logger.error(
+            "Erro HTTP na interpretação financeira: status=%s, resposta=%s",
             exc.response.status_code,
+            exc.response.text[:1000],
         )
         return {
             "status": "indisponivel",
@@ -189,7 +201,9 @@ def interpretar_analise_financeira(
         }
 
     except (httpx.HTTPError, ValueError, KeyError, TypeError):
-        logger.exception("Falha na interpretação financeira.")
+        logger.exception(
+            "Falha na interpretação financeira do Cloudflare."
+        )
         return {
             "status": "indisponivel",
             "provedor": "Cloudflare Workers AI",
