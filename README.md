@@ -1,8 +1,5 @@
 # SplitAgent — Back-End
 
-**Desenvolvido por Tiago Pereira Dias**  
-*Engenharia de Back-End e Integração de Inteligência Artificial*
-
 O **SplitAgent** é uma solução de inteligência financeira desenvolvida para auxiliar pequenos negócios na organização, análise e planejamento de suas finanças. O projeto foi desenvolvido pela equipe **ThreeValley**, em parceria com a IBM e o Banco do Brasil.
 
 Este repositório contém o back-end da aplicação: uma API REST responsável pelo processamento das informações financeiras, gerenciamento de usuários, cálculos, simulações e integração dos agentes inteligentes.
